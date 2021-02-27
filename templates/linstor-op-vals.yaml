@@ -1,0 +1,14 @@
+operator:
+  satelliteSet:
+    storagePools:
+      lvmPools:
+      - name: lvm-thick
+        volumeGroup: drbdpool
+      lvmThinPools:
+      - name: lvm-thin
+        thinVolume: thinpool
+        volumeGroup: drbdpool
+    kernelModuleInjectionMode: Compile
+    kernelModuleInjectionImage: drbd.io/drbd9-focal
+stork:
+  enabled: false

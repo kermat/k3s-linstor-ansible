@@ -1,0 +1,142 @@
+---
+- hosts: all
+  any_errors_fatal: true
+  gather_facts: yes
+  become: yes
+ 
+  tasks:
+  - name: set Hostnames
+    hostname:
+      name: "{{ hostname }}"
+
+  - name: create drbdpool volume group for LINSTOR
+    lvg:
+      vg: drbdpool
+      pvs: "{{ drbd_backing_disk }}"
+    tags: linstor
+  
+  - name: create thin LVM on drbdpool
+    lvol:
+      vg: drbdpool
+      thinpool: thinpool
+      size: 50%VG
+    tags: linstor
+
+  - name: install "build-essential" package
+    apt:
+      name: build-essential
+      update_cache: yes
+    tags: linstor
+
+  - name: get k3s installer script
+    get_url:
+      url: https://get.k3s.io
+      dest: /root/get-k3s
+      mode: 0755
+
+- hosts: k3s_master
+  any_errors_fatal: true
+  gather_facts: yes
+  become: yes
+ 
+  tasks:
+  - name: k3s init master
+    shell: "/root/get-k3s"
+
+  - name: get k3s token as stdout
+    command: "cat /var/lib/rancher/k3s/server/node-token"
+    register: k3s_server_token
+
+  - name: set k3s token as a fact on master
+    set_fact: join_token={{ k3s_server_token.stdout }}
+    retries: 5
+    delay: 10
+
+- hosts: k3s_worker
+  any_errors_fatal: true
+  gather_facts: yes
+  become: yes
+  
+  environment:
+    JOIN_URL: "https://{{ hostvars[groups['k3s_master'][0]]['inventory_hostname'] }}:6443"
+    JOIN_TOKEN: "{{ hostvars[groups['k3s_master'][0]]['join_token'] }}"
+  
+  tasks:
+  - name: k3s join worker
+    shell: "K3S_URL=$JOIN_URL K3S_TOKEN=$JOIN_TOKEN /root/get-k3s"
+
+- hosts: k3s_master
+  any_errors_fatal: true
+  gather_facts: yes
+  become: yes
+ 
+  environment:
+    PATH: "/usr/local/bin:{{ ansible_env.PATH }}"
+
+  tasks:
+  - name: copy storage pool layout
+    template:
+      src: linstor-op-vals.yaml
+      dest: /root/
+      mode: 0644
+    tags: linstor
+  
+  - name: copy storage classes template
+    template:
+      src: sc.yaml
+      dest: /root/
+      mode: 0644
+    tags: linstor
+
+  - name: wait for all nodes to be ready
+    shell: "while [ `kubectl get nodes | grep Ready | wc -l` -ne {{ groups['all'] | length }}  ]; do echo waiting; sleep 2s; done"
+
+  - name: set NODE_STR for LINSTOR etcd hostpath
+    shell: "kubectl get no -o jsonpath={.items[*].metadata.name} | sed 's/ /,/g'"
+    register: node_str
+    tags: linstor
+  
+  - name: get helm3 installer script
+    get_url:
+      url: https://raw.githubusercontent.com/helm/helm/master/scripts/get-helm-3
+      dest: /root/get-helm-3
+      mode: 0755
+    tags: linstor
+
+  - name: install helm3
+    shell: "/root/get-helm-3"
+    tags: linstor
+
+  - name: create linstor namespace
+    shell: "kubectl create namespace linstor"
+    register: namespace_reg
+    failed_when: namespace_reg.rc >= 2
+    tags: linstor
+
+  - name: create drbd.io secret
+    command: "kubectl create -n linstor secret docker-registry drbdiocred --docker-server=drbd.io --docker-username={{ lb_user }} --docker-email=ansible@linbit.com --docker-password={{ lb_pass }}"
+    register: secret_reg
+    failed_when: secret_reg.rc >= 2
+    tags: linstor
+
+  - name: add LINSTOR repo
+    shell: "/usr/local/bin/helm --kubeconfig /etc/rancher/k3s/k3s.yaml repo add linstor https://charts.linstor.io"
+    retries: 5
+    delay: 2
+    register: add_linstor_io
+    until: add_linstor_io.rc == 0
+    tags: linstor
+
+  - name: install linstor-etcd-pv
+    shell: "/usr/local/bin/helm -n linstor --kubeconfig /etc/rancher/k3s/k3s.yaml install linstor-etcd linstor/pv-hostpath --set nodes={\"{{ node_str.stdout }}\"}"
+    register: etcd_pv_reg
+    failed_when: etcd_pv_reg.rc >= 2
+    tags: linstor
+
+  - name: install linstor operator 
+    shell: "/usr/local/bin/helm -n linstor --kubeconfig /etc/rancher/k3s/k3s.yaml install -f /root/linstor-op-vals.yaml linstor-op linstor/linstor"
+    tags: linstor
+
+  - name: setup storage classes
+    command: kubectl apply -f /root/sc.yaml
+    tags: linstor

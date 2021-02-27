@@ -1,0 +1,22 @@
+{% for node in groups['all'] %}
+---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: "linstor-csi-lvm-thin-r{{loop.index}}"
+provisioner: linstor.csi.linbit.com
+parameters:
+  autoPlace: "{{loop.index}}"
+  storagePool: "lvm-thin"
+reclaimPolicy: Delete
+---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: "linstor-csi-lvm-thick-r{{loop.index}}"
+provisioner: linstor.csi.linbit.com
+parameters:
+  autoPlace: "{{loop.index}}"
+  storagePool: "lvm-thick"
+reclaimPolicy: Delete
+{% endfor %}
